@@ -1,0 +1,36 @@
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: kaloree
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: kaloree
+    ports: ["127.0.0.1:5432:5432"]
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kaloree -d kaloree"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  migrate:
+    build: .
+    command: ["--migrate"]
+    environment: &appenv
+      ASPNETCORE_ENVIRONMENT: Development
+      ConnectionStrings__Database: Host=postgres;Database=kaloree;Username=kaloree;Password=${POSTGRES_PASSWORD}
+      Auth__DevelopmentTokens: "true"
+      Auth__DevelopmentSigningKey: ${DEV_SIGNING_KEY:?Set a random 64 character DEV_SIGNING_KEY}
+      AI__Enabled: "false"
+      Billing__Enabled: "false"
+    depends_on:
+      postgres: { condition: service_healthy }
+  api:
+    build: .
+    environment:
+      <<: *appenv
+      Service__Role: all
+    ports: ["127.0.0.1:8080:8080"]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+volumes:
+  pgdata:

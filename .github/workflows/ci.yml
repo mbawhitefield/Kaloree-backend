@@ -1,0 +1,29 @@
+name: backend
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: local-ci-password
+          POSTGRES_DB: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 3s --health-retries 20
+    env:
+      TEST_DATABASE: Host=localhost;Database=postgres;Username=postgres;Password=local-ci-password
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - run: dotnet restore tests/Kaloree.Tests --locked-mode
+      - run: dotnet build tests/Kaloree.Tests -c Release --no-restore
+      - run: dotnet test tests/Kaloree.Tests -c Release --no-build --logger trx
+      - run: dotnet list src/Kaloree.Api package --vulnerable --include-transitive
+      - run: docker build -t kaloree-api:ci .

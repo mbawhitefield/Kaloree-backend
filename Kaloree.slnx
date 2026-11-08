@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Kaloree.Api/Kaloree.Api.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Kaloree.Tests/Kaloree.Tests.csproj" />
+  </Folder>
+</Solution>

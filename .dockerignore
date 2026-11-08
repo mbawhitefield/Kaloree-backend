@@ -1,0 +1,8 @@
+.git
+.local
+**/bin
+**/obj
+**/appsettings.Local.json
+.env
+tests
+docs
