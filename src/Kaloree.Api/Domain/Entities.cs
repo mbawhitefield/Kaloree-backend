@@ -4,6 +4,8 @@ public sealed class Account
 {
     public Guid Id { get; set; } = Guid.NewGuid();
     public string Subject { get; set; } = "";
+    [System.Text.Json.Serialization.JsonIgnore]
+    public string? IdentityUserId { get; set; }
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
     public DateOnly? BirthDate { get; set; }
     public string? EquationSex { get; set; }

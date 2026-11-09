@@ -1,10 +1,14 @@
 using Kaloree.Api.Domain;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.AspNetCore.Identity;
+using Microsoft.AspNetCore.Identity.EntityFrameworkCore;
+using Microsoft.AspNetCore.DataProtection.EntityFrameworkCore;
 
 namespace Kaloree.Api.Infrastructure;
 
-public sealed class AppDb(DbContextOptions<AppDb> options) : DbContext(options)
+public sealed class AppDb(DbContextOptions<AppDb> options) : IdentityDbContext<IdentityUser>(options), IDataProtectionKeyContext
 {
+    public DbSet<DataProtectionKey> DataProtectionKeys => Set<DataProtectionKey>();
     public DbSet<Account> Accounts => Set<Account>();
     public DbSet<Food> Foods => Set<Food>();
     public DbSet<Meal> Meals => Set<Meal>();
@@ -19,9 +23,12 @@ public sealed class AppDb(DbContextOptions<AppDb> options) : DbContext(options)
 
     protected override void OnModelCreating(ModelBuilder b)
     {
+        base.OnModelCreating(b);
+        b.Entity<IdentityUser>().HasIndex(x => x.NormalizedEmail).IsUnique();
         b.HasPostgresExtension("pg_trgm");
         b.Entity<Account>().HasIndex(x => x.Subject).IsUnique();
         b.Entity<Account>().Property(x => x.Subject).HasMaxLength(200);
+        b.Entity<Account>().HasOne<IdentityUser>().WithOne().HasForeignKey<Account>(x => x.IdentityUserId).OnDelete(DeleteBehavior.Cascade);
         b.Entity<Account>().Property(x => x.Version).IsConcurrencyToken();
         b.Entity<Food>().HasIndex(x => new { x.AccountId, x.Name });
         b.Entity<Food>().HasIndex(x => x.Barcode);

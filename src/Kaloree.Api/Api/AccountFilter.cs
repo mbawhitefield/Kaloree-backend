@@ -1,6 +1,8 @@
 using Kaloree.Api.Domain;
 using Kaloree.Api.Infrastructure;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.AspNetCore.Identity;
+using System.Security.Claims;
 
 namespace Kaloree.Api.Api;
 
@@ -23,9 +25,11 @@ public sealed class AccountFilter : IEndpointFilter
         if (account is null && h.Request.Method == "POST" && h.Request.Path == "/api/v1/account")
         {
             var id = Guid.NewGuid();
+            var identityUserId = h.User.Identity?.AuthenticationType == IdentityConstants.ApplicationScheme
+                ? h.User.FindFirst(ClaimTypes.NameIdentifier)?.Value : null;
             await db.Database.ExecuteSqlInterpolatedAsync($"""
-                INSERT INTO "Accounts" ("Id", "Subject", "CreatedAt", "ActivityFactor", "ProteinPercent", "FatPercent", "PhotoConsent", "Version")
-                VALUES ({id}, {subject!}, {DateTimeOffset.UtcNow}, 1.2, 25, 30, false, 0)
+                INSERT INTO "Accounts" ("Id", "Subject", "IdentityUserId", "CreatedAt", "ActivityFactor", "ProteinPercent", "FatPercent", "PhotoConsent", "Version")
+                VALUES ({id}, {subject!}, {identityUserId}, {DateTimeOffset.UtcNow}, 1.2, 25, 30, false, 0)
                 ON CONFLICT ("Subject") DO NOTHING
                 """, h.RequestAborted);
             account = await db.Accounts.SingleAsync(x => x.Subject == subject, h.RequestAborted);

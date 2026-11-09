@@ -75,6 +75,10 @@ public static class ProfileEndpoints
             await db.UsageBuckets.Where(x => x.Key.StartsWith("scan:" + a.Id + ":")).ExecuteDeleteAsync(ct);
             await db.UsageBuckets.Where(x => x.Key.StartsWith("api:" + a.Id + ":")).ExecuteDeleteAsync(ct);
             await db.Accounts.Where(x => x.Id == a.Id).ExecuteDeleteAsync(ct);
+            if (a.Value.IdentityUserId is { } identityId)
+            {
+                await db.Users.Where(x => x.Id == identityId).ExecuteDeleteAsync(ct);
+            }
             await tx.CommitAsync(ct);
             return Results.NoContent();
         });

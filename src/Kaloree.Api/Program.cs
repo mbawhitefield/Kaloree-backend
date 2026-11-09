@@ -9,6 +9,9 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using Npgsql;
 using Microsoft.OpenApi;
+using Microsoft.AspNetCore.Identity;
+using Microsoft.AspNetCore.DataProtection;
+using Microsoft.AspNetCore.Authentication.BearerToken;
 
 var builder = WebApplication.CreateBuilder(args);
 builder.Logging.ClearProviders();
@@ -18,17 +21,42 @@ builder.WebHost.ConfigureKestrel(o => { o.Limits.MaxRequestBodySize = 8 * 1024 *
 if (Environment.GetEnvironmentVariable("PORT") is { } port) builder.WebHost.UseUrls($"http://0.0.0.0:{port}");
 var connection = builder.Configuration.GetConnectionString("Database") ?? throw new InvalidOperationException("ConnectionStrings:Database is required");
 var auth = builder.Configuration.GetSection("Auth");
+if ((auth["Mode"] ?? "local").ToLowerInvariant() is not ("local" or "oidc"))
+    throw new InvalidOperationException("Auth:Mode must be local or oidc");
 var developmentAuth = builder.Environment.IsDevelopment() && auth.GetValue<bool>("DevelopmentTokens");
-if (!developmentAuth && (!Uri.TryCreate(auth["Authority"], UriKind.Absolute, out var authority) || authority.Scheme != "https" || string.IsNullOrWhiteSpace(auth["Audience"])))
+var localAuth = !string.Equals(auth["Mode"], "oidc", StringComparison.OrdinalIgnoreCase);
+if (!localAuth && !developmentAuth && (!Uri.TryCreate(auth["Authority"], UriKind.Absolute, out var authority) || authority.Scheme != "https" || string.IsNullOrWhiteSpace(auth["Audience"])))
     throw new InvalidOperationException("An HTTPS Auth:Authority and Auth:Audience are required");
 builder.Services.AddDbContext<AppDb>(o => o.UseNpgsql(connection, npg => npg.CommandTimeout(15)));
+builder.Services.AddDataProtection().SetApplicationName("Kaloree").PersistKeysToDbContext<AppDb>();
+builder.Services.AddIdentityApiEndpoints<IdentityUser>(o =>
+{
+    o.User.RequireUniqueEmail = true;
+    o.SignIn.RequireConfirmedEmail = true;
+    o.Password.RequiredLength = 12;
+    o.Lockout.MaxFailedAccessAttempts = 5;
+    o.Lockout.DefaultLockoutTimeSpan = TimeSpan.FromMinutes(15);
+}).AddEntityFrameworkStores<AppDb>();
+builder.Services.Configure<BearerTokenOptions>(IdentityConstants.BearerScheme, o =>
+{
+    o.BearerTokenExpiration = TimeSpan.FromMinutes(15);
+    o.RefreshTokenExpiration = TimeSpan.FromDays(30);
+});
+builder.Services.Configure<DataProtectionTokenProviderOptions>(o => o.TokenLifespan = TimeSpan.FromHours(1));
+builder.Services.AddSingleton<IdentityEmail>();
+builder.Services.AddSingleton<IEmailSender<IdentityUser>>(sp => sp.GetRequiredService<IdentityEmail>());
 builder.Services.AddScoped<CurrentAccount>(); builder.Services.AddScoped<Quota>();
 builder.Services.AddSingleton<PhotoCipher>();
 builder.Services.AddHttpClient("food-catalog", c => c.Timeout = TimeSpan.FromSeconds(8));
 builder.Services.AddSingleton(sp => new FoodCatalog(sp.GetRequiredService<IHttpClientFactory>().CreateClient("food-catalog"), sp.GetRequiredService<IConfiguration>()));
 builder.Services.AddHttpClient<IMealVision, OpenAiVision>(c => c.Timeout = TimeSpan.FromSeconds(75));
 builder.Services.AddHttpClient<ISubscriptionProvider, RevenueCat>(c => c.Timeout = TimeSpan.FromSeconds(8));
-builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme).AddJwtBearer(o =>
+builder.Services.AddAuthentication(o =>
+{
+    o.DefaultScheme = localAuth && !developmentAuth ? IdentityConstants.BearerScheme : JwtBearerDefaults.AuthenticationScheme;
+    o.DefaultAuthenticateScheme = o.DefaultScheme;
+    o.DefaultChallengeScheme = o.DefaultScheme;
+}).AddJwtBearer(o =>
 {
     o.MapInboundClaims = false; o.RequireHttpsMetadata = true;
     if (developmentAuth)
@@ -43,7 +71,7 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme).AddJw
             ValidAlgorithms = [SecurityAlgorithms.HmacSha256], ClockSkew = TimeSpan.FromSeconds(30)
         };
     }
-    else
+    else if (!localAuth)
     {
         o.Authority = auth["Authority"]; o.Audience = auth["Audience"];
         o.TokenValidationParameters = new TokenValidationParameters
@@ -60,14 +88,16 @@ builder.Services.AddOpenApi(o => o.AddDocumentTransformer((document, _, _) =>
     document.Components ??= new OpenApiComponents();
     document.Components.SecuritySchemes = new Dictionary<string, IOpenApiSecurityScheme>
     {
-        ["bearer"] = new OpenApiSecurityScheme { Type = SecuritySchemeType.Http, Scheme = "bearer", BearerFormat = "JWT" },
+        ["bearer"] = new OpenApiSecurityScheme { Type = SecuritySchemeType.Http, Scheme = "bearer", BearerFormat = localAuth && !developmentAuth ? "Identity opaque token" : "JWT" },
         ["revenuecatHmac"] = new OpenApiSecurityScheme { Type = SecuritySchemeType.ApiKey, In = ParameterLocation.Header,
             Name = "X-RevenueCat-Webhook-Signature", Description = "HMAC SHA-256 over timestamp.raw-body; see operations runbook." }
     };
     foreach (var path in document.Paths)
         foreach (var operation in path.Value.Operations?.Values.AsEnumerable() ?? Enumerable.Empty<OpenApiOperation>())
         {
-            if (path.Key.StartsWith("/api/", StringComparison.Ordinal)) operation.Security =
+            if (path.Key.StartsWith("/api/", StringComparison.Ordinal) &&
+                (!path.Key.StartsWith("/api/v1/auth/", StringComparison.Ordinal) ||
+                 path.Key.StartsWith("/api/v1/auth/manage/", StringComparison.Ordinal) || path.Key == "/api/v1/auth/logout")) operation.Security =
                 [new OpenApiSecurityRequirement { [new OpenApiSecuritySchemeReference("bearer", document)] = [] }];
             else if (path.Key == "/webhooks/revenuecat") operation.Security =
                 [new OpenApiSecurityRequirement { [new OpenApiSecuritySchemeReference("revenuecatHmac", document)] = [] }];
@@ -82,6 +112,9 @@ builder.Services.AddCors(o => o.AddDefaultPolicy(p =>
 builder.Services.AddRateLimiter(o =>
 {
     o.RejectionStatusCode = 429;
+    o.AddPolicy("auth", h => RateLimitPartition.GetFixedWindowLimiter(
+        h.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+        _ => new FixedWindowRateLimiterOptions { PermitLimit = 20, Window = TimeSpan.FromMinutes(1), QueueLimit = 0 }));
     o.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(h =>
         RateLimitPartition.GetFixedWindowLimiter(h.User.FindFirst("sub")?.Value ?? h.Connection.RemoteIpAddress?.ToString() ?? "unknown",
             _ => new FixedWindowRateLimiterOptions { PermitLimit = 120, Window = TimeSpan.FromMinutes(1), QueueLimit = 0 }));
@@ -169,7 +202,9 @@ app.Use(async (h, next) =>
     });
     await next();
 });
-app.UseCors(); app.UseAuthentication(); app.UseRateLimiter(); app.UseAuthorization();
+app.UseCors(); app.UseAuthentication(); app.UseRateLimiter();
+if (localAuth && !developmentAuth) app.Use(LocalIdentity.ValidateLocalIdentity);
+app.UseAuthorization();
 app.MapGet("/health/live", () => Results.Ok(new { status = "live" })).AllowAnonymous();
 app.MapGet("/health/ready", async (AppDb db, CancellationToken ct) =>
 {
@@ -178,6 +213,7 @@ app.MapGet("/health/ready", async (AppDb db, CancellationToken ct) =>
 }).AllowAnonymous();
 if (role is "api" or "all")
 {
+    if (localAuth) app.MapLocalIdentity();
     var api = app.MapGroup("/api/v1").RequireAuthorization().AddEndpointFilter<AccountFilter>();
     api.MapProfile(); api.MapFoods(); api.MapDiary(); api.MapPlans(); api.MapAnalysis(); app.MapBilling();
     if (app.Environment.IsDevelopment()) app.MapOpenApi().AllowAnonymous();

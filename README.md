@@ -6,7 +6,7 @@ The generated [OpenAPI contract](docs/openapi.json) is ready for client tooling.
 
 ## Implemented
 
-- OIDC/OAuth access-token validation; explicit account provisioning; owner-scoped data access.
+- Built-in ASP.NET Core Identity registration/login, verified email, password recovery, authenticator MFA and session revocation; explicit account provisioning and owner-scoped access. Optional OIDC mode remains available.
 - Adult profile, Mifflin-St Jeor BMR/TDEE estimates, calorie and macro targets.
 - Versioned meal diary with immutable nutrition snapshots; weight and water tracking; daily summaries.
 - Custom foods, indexed local food search, Open Food Facts barcode lookup with source attribution.
@@ -36,7 +36,7 @@ $headers = @{ Authorization = "Bearer $token" }
 Invoke-RestMethod -Method Post -Uri http://localhost:8080/api/v1/account -Headers $headers
 ```
 
-Development tokens are accepted only in the `Development` environment. Production requires an HTTPS OIDC issuer and matching API audience; the backend does not issue its own production tokens. Flutter should use Authorization Code + PKCE and native secure storage. Signup, verification, social login, password recovery, MFA and session revocation belong to the chosen identity provider.
+Development tokens are accepted only in the `Development` environment. Production defaults to built-in C# authentication backed by PostgreSQL; no external login provider is required. See [authentication setup and client contract](docs/authentication.md). Configure SMTP and the public API origin to enable registration/verification/recovery. The API can start before email is configured; email-dependent endpoints return 503 until configured. The local Compose token flow above is separate from the built-in login flow.
 
 For running directly without Docker, set `ConnectionStrings__Database`, `ASPNETCORE_ENVIRONMENT=Development`, `Auth__DevelopmentTokens=true`, and `Auth__DevelopmentSigningKey`, then:
 
@@ -65,6 +65,6 @@ The test fixture creates and drops a uniquely named database. Never use producti
 
 An operator can load an approved global food dataset with `dotnet run --project src/Kaloree.Api -- --import-foods PATH.json`. The file is an array of `{ "id": "stable-uuid", "source": "source name and attribution", "food": { "name": "...", "barcode": null, "calories100g": 0, "protein100g": 0, "carbs100g": 0, "fat100g": 0 } }`. Use source-appropriate, verified nutrition values. Imports are bounded, validated, parameterized and committed in batches of 1,000; repeat imports use stable IDs. This administrative command cannot overwrite private foods. Source licensing and attribution must permit your intended use.
 
-Before accepting real users: configure the identity provider, RevenueCat products and webhook, an OpenAI project/model/key, a photo encryption key, food-data coverage and licensing, a domain, Railway services and backups. These are integration boundaries, not mocked production services. The test suite uses a fake billing provider and does not spend money on live AI calls.
+Before accepting real users: configure SMTP/email delivery and the public API origin, RevenueCat products and webhook, an OpenAI project/model/key, a photo encryption key, food-data coverage and licensing, a domain, Railway services and backups. These are integration boundaries, not mocked production services. The test suite uses a fake billing provider and does not spend money on live AI calls.
 
 This backend does not include a Flutter client, store submissions, a staff administration UI, push-notification delivery, health-platform sync, or an AI accuracy evaluation dataset. No live deployment is implied by the presence of deployment files.
