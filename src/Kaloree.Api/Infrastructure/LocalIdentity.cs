@@ -1,11 +1,16 @@
 using System.Security.Claims;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Identity.Data;
+using Microsoft.AspNetCore.Http.Metadata;
+using System.Text.Json.Serialization;
 
 namespace Kaloree.Api.Infrastructure;
 
 public static class LocalIdentity
 {
+    [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+    public sealed record PasswordChangeInput(string OldPassword, string NewPassword);
+
     public static void MapLocalIdentity(this WebApplication app)
     {
         var group = app.MapGroup("/api/v1/auth").RequireRateLimiting("auth");
@@ -18,11 +23,7 @@ public static class LocalIdentity
                     RegisterRequest r => string.IsNullOrEmpty(r.Email) || r.Email.Length > 256 || string.IsNullOrEmpty(r.Password),
                     LoginRequest r => string.IsNullOrEmpty(r.Email) || r.Email.Length > 256 || string.IsNullOrEmpty(r.Password),
                     RefreshRequest r => string.IsNullOrEmpty(r.RefreshToken) || r.RefreshToken.Length > 16384,
-                    ResetPasswordRequest r => string.IsNullOrEmpty(r.Email) || r.Email.Length > 256 ||
-                        string.IsNullOrEmpty(r.ResetCode) || r.ResetCode.Length > 16384 || string.IsNullOrEmpty(r.NewPassword),
-                    ForgotPasswordRequest r => string.IsNullOrEmpty(r.Email) || r.Email.Length > 256,
-                    ResendConfirmationEmailRequest r => string.IsNullOrEmpty(r.Email) || r.Email.Length > 256,
-                    InfoRequest r => r.OldPassword?.Length > 1024 || r.NewEmail?.Length > 256,
+                    PasswordChangeInput r => r.OldPassword?.Length > 1024,
                     _ => false
                 };
                 if (invalid) return Results.Problem(statusCode: 400, title: "invalid_request");
@@ -30,15 +31,28 @@ public static class LocalIdentity
                 {
                     RegisterRequest r => r.Password,
                     LoginRequest r => r.Password,
-                    ResetPasswordRequest r => r.NewPassword,
-                    InfoRequest r => r.NewPassword,
+                    PasswordChangeInput r => r.NewPassword,
                     _ => null
                 };
                 if (password?.Length > 1024) return Results.Problem(statusCode: 400, title: "password_too_long");
             }
             return await next(context);
         });
-        group.MapIdentityApi<IdentityUser>();
+        // Keep framework login, refresh and authenticator handling. Disable its email-dependent
+        // endpoints and replace registration/password changes with flows that never send email.
+        group.MapIdentityApi<IdentityUser>().Add(endpoint =>
+        {
+            if (endpoint is not RouteEndpointBuilder route) return;
+            var path = route.RoutePattern.RawText?.ToLowerInvariant();
+            var post = endpoint.Metadata.OfType<HttpMethodMetadata>().Any(m => m.HttpMethods.Contains("POST"));
+            if (path is "/api/v1/auth/register" or "/api/v1/auth/confirmemail" or
+                "/api/v1/auth/resendconfirmationemail" or "/api/v1/auth/forgotpassword" or
+                "/api/v1/auth/resetpassword" || (path == "/api/v1/auth/manage/info" && post))
+                endpoint.Metadata.Add(new DisabledEndpoint());
+        });
+        group.MapPost("/register", Register).Produces(200).ProducesValidationProblem();
+        group.MapPost("/manage/info", ChangePassword).RequireAuthorization()
+            .Produces<InfoResponse>().ProducesValidationProblem();
         group.MapPost("/logout", async (ClaimsPrincipal principal, UserManager<IdentityUser> users) =>
         {
             var user = await users.GetUserAsync(principal);
@@ -73,17 +87,6 @@ public static class LocalIdentity
                 h.Response.StatusCode = 400;
                 return;
             }
-            var path = h.Request.Path.Value?.ToLowerInvariant();
-            if (path is "/api/v1/auth/register" or "/api/v1/auth/resendconfirmationemail" or "/api/v1/auth/forgotpassword" ||
-                (path == "/api/v1/auth/manage/info" && h.Request.Method == "POST"))
-            {
-                // Fail before account creation if email delivery has not been configured.
-                if (!h.RequestServices.GetRequiredService<IdentityEmail>().Configured)
-                {
-                    await Results.Problem(statusCode: 503, title: "email_not_configured").ExecuteAsync(h);
-                    return;
-                }
-            }
             var quota = h.RequestServices.GetRequiredService<Quota>();
             var now = DateTimeOffset.UtcNow;
             var ip = h.Connection.RemoteIpAddress?.ToString() ?? "unknown";
@@ -94,5 +97,32 @@ public static class LocalIdentity
             }
         }
         await next(h);
+    }
+
+    private static async Task<IResult> Register(RegisterRequest input, UserManager<IdentityUser> users)
+    {
+        var user = new IdentityUser { UserName = input.Email, Email = input.Email };
+        var result = await users.CreateAsync(user, input.Password);
+        return result.Succeeded ? Results.Ok() : IdentityErrors(result);
+    }
+
+    private static async Task<IResult> ChangePassword(PasswordChangeInput input, ClaimsPrincipal principal, UserManager<IdentityUser> users)
+    {
+        if (string.IsNullOrEmpty(input.OldPassword) || string.IsNullOrEmpty(input.NewPassword))
+            return Results.Problem(statusCode: 400, title: "current_and_new_password_required");
+        var user = await users.GetUserAsync(principal);
+        if (user is null) return Results.Unauthorized();
+        var result = await users.ChangePasswordAsync(user, input.OldPassword, input.NewPassword);
+        if (!result.Succeeded) return IdentityErrors(result);
+        return Results.Ok(new InfoResponse { Email = user.Email!, IsEmailConfirmed = user.EmailConfirmed });
+    }
+
+    private static IResult IdentityErrors(IdentityResult result) => Results.ValidationProblem(
+        result.Errors.GroupBy(e => e.Code).ToDictionary(g => g.Key, g => g.Select(e => e.Description).ToArray()));
+
+    private sealed class DisabledEndpoint : ISuppressMatchingMetadata, IExcludeFromDescriptionMetadata
+    {
+        public bool SuppressMatching => true;
+        public bool ExcludeFromDescription => true;
     }
 }

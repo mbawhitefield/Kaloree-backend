@@ -6,7 +6,7 @@ The generated [OpenAPI contract](docs/openapi.json) is ready for client tooling.
 
 ## Implemented
 
-- Built-in ASP.NET Core Identity registration/login, verified email, password recovery, authenticator MFA and session revocation; explicit account provisioning and owner-scoped access. Optional OIDC mode remains available.
+- Built-in ASP.NET Core Identity registration/login without email delivery or verification, authenticated password changes, authenticator MFA and session revocation; explicit account provisioning and owner-scoped access. Optional OIDC mode remains available.
 - Adult profile, Mifflin-St Jeor BMR/TDEE estimates, calorie and macro targets.
 - Versioned meal diary with immutable nutrition snapshots; weight and water tracking; daily summaries.
 - Custom foods, indexed local food search, Open Food Facts barcode lookup with source attribution.
@@ -18,6 +18,12 @@ The generated [OpenAPI contract](docs/openapi.json) is ready for client tooling.
 - Paginated data export and cascading account-data deletion.
 - Docker, Railway configuration, schema migrations, dependency lock files and CI.
 
+## Swagger and login
+
+Open `/swagger` on the API service, including Production. Register through `POST /api/v1/auth/register`, then log in through `POST /api/v1/auth/login`. No email verification or SMTP setup is required. Copy the returned `accessToken` into Swagger's **Authorize** dialog, then call `POST /api/v1/account` to provision the nutrition account before using profile and diary endpoints. Password-reset recovery is unavailable; signed-in users can change their password using the current password.
+
+The documentation is public; private API operations still require bearer authorization. Set `Swagger__Enabled=false` to disable both Swagger UI and `/openapi/v1.json`. Worker services expose neither.
+
 ## Local startup
 
 Install .NET 10 and Docker Desktop. Copy `.env.example` to `.env` and generate random values for its two variables. The development signing key needs at least 64 characters.
@@ -26,7 +32,7 @@ Install .NET 10 and Docker Desktop. Copy `.env.example` to `.env` and generate r
 docker compose up --build -d
 ```
 
-The API runs at `http://localhost:8080`; `/health/ready` checks the database and schema. Local OpenAPI: `/openapi/v1.json`. Compose deliberately disables paid external services.
+The API runs at `http://localhost:8080`; `/health/ready` checks the database and schema. Swagger UI: `/swagger`; OpenAPI: `/openapi/v1.json`. These are also available in Production when `Swagger:Enabled=true` (the default). Compose deliberately disables paid external services.
 
 Generate a local token using the same signing key as `.env`:
 
@@ -36,7 +42,7 @@ $headers = @{ Authorization = "Bearer $token" }
 Invoke-RestMethod -Method Post -Uri http://localhost:8080/api/v1/account -Headers $headers
 ```
 
-Development tokens are accepted only in the `Development` environment. Production defaults to built-in C# authentication backed by PostgreSQL; no external login provider is required. See [authentication setup and client contract](docs/authentication.md). Configure SMTP and the public API origin to enable registration/verification/recovery. The API can start before email is configured; email-dependent endpoints return 503 until configured. The local Compose token flow above is separate from the built-in login flow.
+Development tokens are accepted only in the `Development` environment. Production defaults to built-in C# authentication backed by PostgreSQL; no external login provider is required. See [authentication setup and client contract](docs/authentication.md). Registration and login work immediately without SMTP, email confirmation or a public-origin variable. Email delivery, verification, email changes and password-reset recovery are currently unavailable. Signed-in users can change their password with the current password. The local Compose token flow above is separate from the built-in login flow.
 
 For running directly without Docker, set `ConnectionStrings__Database`, `ASPNETCORE_ENVIRONMENT=Development`, `Auth__DevelopmentTokens=true`, and `Auth__DevelopmentSigningKey`, then:
 
@@ -65,6 +71,6 @@ The test fixture creates and drops a uniquely named database. Never use producti
 
 An operator can load an approved global food dataset with `dotnet run --project src/Kaloree.Api -- --import-foods PATH.json`. The file is an array of `{ "id": "stable-uuid", "source": "source name and attribution", "food": { "name": "...", "barcode": null, "calories100g": 0, "protein100g": 0, "carbs100g": 0, "fat100g": 0 } }`. Use source-appropriate, verified nutrition values. Imports are bounded, validated, parameterized and committed in batches of 1,000; repeat imports use stable IDs. This administrative command cannot overwrite private foods. Source licensing and attribution must permit your intended use.
 
-Before accepting real users: configure SMTP/email delivery and the public API origin, RevenueCat products and webhook, an OpenAI project/model/key, a photo encryption key, food-data coverage and licensing, a domain, Railway services and backups. These are integration boundaries, not mocked production services. The test suite uses a fake billing provider and does not spend money on live AI calls.
+Before accepting real users: configure RevenueCat products and webhook, an OpenAI project/model/key, a photo encryption key, food-data coverage and licensing, a domain, Railway services and backups. These are integration boundaries, not mocked production services. The test suite uses a fake billing provider and does not spend money on live AI calls.
 
 This backend does not include a Flutter client, store submissions, a staff administration UI, push-notification delivery, health-platform sync, or an AI accuracy evaluation dataset. No live deployment is implied by the presence of deployment files.

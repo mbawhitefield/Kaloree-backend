@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
@@ -8,10 +7,8 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc.Testing;
-using Microsoft.AspNetCore.WebUtilities;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.BearerToken;
 using Microsoft.Extensions.Options;
@@ -25,35 +22,27 @@ public sealed class IdentityTests(ApiFixture fixture) : IClassFixture<ApiFixture
 {
     private const string Password = "Test-password-12345!";
     private const string NewPassword = "Changed-password-67890!";
-    private readonly TestEmail email = new();
     private readonly IPAddress clientAddress = new(new byte[] { 10 }.Concat(Guid.NewGuid().ToByteArray().Take(3)).ToArray());
 
-    private WebApplicationFactory<Program> Factory(bool configured = true) => fixture.Factory.WithWebHostBuilder(b =>
+    private WebApplicationFactory<Program> Factory(bool swagger = true, string role = "api") => fixture.Factory.WithWebHostBuilder(b =>
     {
         b.UseEnvironment("Production");
         b.UseSetting("Auth:Mode", "local");
         b.UseSetting("Auth:DevelopmentTokens", "false");
-        b.UseSetting("Auth:PublicUrl", "https://api.kaloree.test");
-        b.UseSetting("Email:Host", configured ? "smtp.test" : "");
-        b.UseSetting("Email:From", "accounts@kaloree.test");
+        b.UseSetting("Swagger:Enabled", swagger.ToString());
+        b.UseSetting("Service:Role", role);
         b.UseSetting("AI:Enabled", "false");
         b.UseSetting("Billing:Enabled", "false");
         b.ConfigureServices(s =>
         {
-            s.Replace(ServiceDescriptor.Singleton<IEmailSender<IdentityUser>>(email));
             s.AddSingleton<IStartupFilter>(new ClientIp(clientAddress));
         });
     });
 
-    private async Task<string> Register(HttpClient client, bool confirm = true)
+    private async Task<string> Register(HttpClient client)
     {
         var address = Guid.NewGuid().ToString("N") + "@kaloree.test";
         (await client.PostAsJsonAsync("/api/v1/auth/register", new { email = address, password = Password })).EnsureSuccessStatusCode();
-        if (confirm)
-        {
-            var link = new Uri(WebUtility.HtmlDecode(email.Confirmations[address]));
-            (await client.GetAsync(link.PathAndQuery)).EnsureSuccessStatusCode();
-        }
         return address;
     }
 
@@ -68,15 +57,11 @@ public sealed class IdentityTests(ApiFixture fixture) : IClassFixture<ApiFixture
         new AuthenticationHeaderValue("Bearer", tokens.GetProperty("accessToken").GetString());
 
     [PostgresFact]
-    public async Task ConfirmationLoginProvisioningAndDeletionPreserveOwnership()
+    public async Task RegistrationLoginProvisioningAndDeletionPreserveOwnership()
     {
         await using var factory = Factory();
         using var c = factory.CreateClient();
-        var address = await Register(c, false);
-        Assert.Equal(HttpStatusCode.Unauthorized, (await c.PostAsJsonAsync("/api/v1/auth/login", new { email = address, password = Password })).StatusCode);
-        var link = new Uri(WebUtility.HtmlDecode(email.Confirmations[address]));
-        Assert.Equal(HttpStatusCode.Unauthorized, (await c.GetAsync(QueryHelpers.AddQueryString("/api/v1/auth/confirmEmail", "userId", "missing") + "&code=invalid")).StatusCode);
-        (await c.GetAsync(link.PathAndQuery)).EnsureSuccessStatusCode();
+        var address = await Register(c);
         var tokens = await Login(c, address);
         Assert.Equal("Bearer", tokens.GetProperty("tokenType").GetString());
         Authorize(c, tokens);
@@ -122,22 +107,20 @@ public sealed class IdentityTests(ApiFixture fixture) : IClassFixture<ApiFixture
     }
 
     [PostgresFact]
-    public async Task PasswordResetIsSingleUseAndRevokesExistingTokens()
+    public async Task PasswordChangeRequiresCurrentPasswordAndRevokesExistingTokens()
     {
         await using var factory = Factory();
         using var c = factory.CreateClient();
         var address = await Register(c);
         var tokens = await Login(c, address);
-        (await c.PostAsJsonAsync("/api/v1/auth/forgotPassword", new { email = address })).EnsureSuccessStatusCode();
-        var reset = new { email = address, resetCode = email.Resets[address], newPassword = NewPassword };
-        Assert.Equal(HttpStatusCode.BadRequest, (await c.PostAsJsonAsync("/api/v1/auth/resetPassword", reset with { resetCode = "invalid" })).StatusCode);
-        (await c.PostAsJsonAsync("/api/v1/auth/resetPassword", reset)).EnsureSuccessStatusCode();
-        Assert.Equal(HttpStatusCode.BadRequest, (await c.PostAsJsonAsync("/api/v1/auth/resetPassword", reset)).StatusCode);
-        Assert.Equal(HttpStatusCode.Unauthorized, (await c.PostAsJsonAsync("/api/v1/auth/login", new { email = address, password = Password })).StatusCode);
-        await Login(c, address, NewPassword);
         Authorize(c, tokens);
+        Assert.Equal(HttpStatusCode.BadRequest, (await c.PostAsJsonAsync("/api/v1/auth/manage/info", new { oldPassword = "wrong", newPassword = NewPassword })).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, (await c.PostAsJsonAsync("/api/v1/auth/manage/info", new { newEmail = "other@kaloree.test" })).StatusCode);
+        (await c.PostAsJsonAsync("/api/v1/auth/manage/info", new { oldPassword = Password, newPassword = NewPassword })).EnsureSuccessStatusCode();
         Assert.Equal(HttpStatusCode.Unauthorized, (await c.GetAsync("/api/v1/auth/manage/info")).StatusCode);
         c.DefaultRequestHeaders.Authorization = null;
+        Assert.Equal(HttpStatusCode.Unauthorized, (await c.PostAsJsonAsync("/api/v1/auth/login", new { email = address, password = Password })).StatusCode);
+        await Login(c, address, NewPassword);
         Assert.Equal(HttpStatusCode.Unauthorized, (await c.PostAsJsonAsync("/api/v1/auth/refresh", new { refreshToken = tokens.GetProperty("refreshToken").GetString() })).StatusCode);
     }
 
@@ -248,27 +231,55 @@ public sealed class IdentityTests(ApiFixture fixture) : IClassFixture<ApiFixture
     }
 
     [PostgresFact]
-    public async Task MissingEmailConfigurationFailsBeforeCreatingIdentity()
+    public async Task RegistrationWorksWithoutEmailAndEmailRoutesAreAbsent()
     {
-        await using var factory = Factory(false);
+        await using var factory = Factory();
         using var c = factory.CreateClient();
         (await c.GetAsync("/health/ready")).EnsureSuccessStatusCode();
         Assert.Equal(HttpStatusCode.Unauthorized, (await c.GetAsync("/api/v1/profile")).StatusCode);
-        var address = Guid.NewGuid().ToString("N") + "@kaloree.test";
-        Assert.Equal(HttpStatusCode.ServiceUnavailable, (await c.PostAsJsonAsync("/api/v1/auth/REGISTER", new { email = address, password = Password })).StatusCode);
+        var address = await Register(c);
+        await Login(c, address);
         await using var db = fixture.Db();
-        Assert.False(await db.Users.AnyAsync(x => x.Email == address));
+        Assert.False((await db.Users.SingleAsync(x => x.Email == address)).EmailConfirmed);
+        Assert.Equal(HttpStatusCode.NotFound, (await c.GetAsync("/api/v1/auth/confirmEmail?userId=missing&code=anything")).StatusCode);
+        foreach (var route in new[] { "resendConfirmationEmail", "forgotPassword", "resetPassword" })
+            Assert.Equal(HttpStatusCode.NotFound, (await c.PostAsJsonAsync("/api/v1/auth/" + route, new { email = address })).StatusCode);
     }
 
-    private sealed class TestEmail : IEmailSender<IdentityUser>
+    [PostgresFact]
+    public async Task SwaggerWorksInProductionWithLocalAssetsAndProtectedApiOperations()
     {
-        public ConcurrentDictionary<string, string> Confirmations { get; } = new();
-        public ConcurrentDictionary<string, string> Resets { get; } = new();
-        public Task SendConfirmationLinkAsync(IdentityUser user, string email, string confirmationLink)
-        { Confirmations[email] = confirmationLink; return Task.CompletedTask; }
-        public Task SendPasswordResetCodeAsync(IdentityUser user, string email, string resetCode)
-        { Resets[email] = WebUtility.HtmlDecode(resetCode); return Task.CompletedTask; }
-        public Task SendPasswordResetLinkAsync(IdentityUser user, string email, string resetLink) => throw new NotSupportedException();
+        await using var factory = Factory();
+        using var c = factory.CreateClient();
+        var page = await c.GetAsync("/swagger/index.html");
+        page.EnsureSuccessStatusCode();
+        Assert.Contains("swagger-ui", await page.Content.ReadAsStringAsync());
+        Assert.Contains("script-src 'self'", page.Headers.GetValues("Content-Security-Policy").Single());
+        (await c.GetAsync("/swagger/swagger-ui-bundle.js")).EnsureSuccessStatusCode();
+        var spec = await c.GetFromJsonAsync<JsonElement>("/openapi/v1.json");
+        var paths = spec.GetProperty("paths");
+        Assert.True(paths.TryGetProperty("/api/v1/auth/register", out _));
+        Assert.False(paths.TryGetProperty("/api/v1/auth/confirmEmail", out _));
+        Assert.False(paths.TryGetProperty("/api/v1/auth/forgotPassword", out _));
+        Assert.False(paths.TryGetProperty("/api/v1/auth/resetPassword", out _));
+        Assert.False(paths.TryGetProperty("/api/v1/auth/resendConfirmationEmail", out _));
+        Assert.DoesNotContain("\"newEmail\"", spec.GetRawText());
+        Assert.False(paths.GetProperty("/api/v1/auth/login").GetProperty("post").TryGetProperty("security", out _));
+        Assert.True(paths.GetProperty("/api/v1/profile").GetProperty("get").TryGetProperty("security", out _));
+        Assert.Equal(HttpStatusCode.Unauthorized, (await c.GetAsync("/api/v1/profile")).StatusCode);
+    }
+
+    [PostgresFact]
+    public async Task SwaggerCanBeDisabledAndIsNotExposedByWorker()
+    {
+        await using var disabled = Factory(false);
+        using var c = disabled.CreateClient();
+        Assert.Equal(HttpStatusCode.NotFound, (await c.GetAsync("/swagger/index.html")).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await c.GetAsync("/openapi/v1.json")).StatusCode);
+        await using var worker = Factory(role: "worker");
+        using var w = worker.CreateClient();
+        Assert.Equal(HttpStatusCode.NotFound, (await w.GetAsync("/swagger/index.html")).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await w.GetAsync("/openapi/v1.json")).StatusCode);
     }
 
     private sealed class ClientIp(IPAddress address) : IStartupFilter

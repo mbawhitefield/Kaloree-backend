@@ -32,7 +32,7 @@ builder.Services.AddDataProtection().SetApplicationName("Kaloree").PersistKeysTo
 builder.Services.AddIdentityApiEndpoints<IdentityUser>(o =>
 {
     o.User.RequireUniqueEmail = true;
-    o.SignIn.RequireConfirmedEmail = true;
+    o.SignIn.RequireConfirmedEmail = false;
     o.Password.RequiredLength = 12;
     o.Lockout.MaxFailedAccessAttempts = 5;
     o.Lockout.DefaultLockoutTimeSpan = TimeSpan.FromMinutes(15);
@@ -42,9 +42,6 @@ builder.Services.Configure<BearerTokenOptions>(IdentityConstants.BearerScheme, o
     o.BearerTokenExpiration = TimeSpan.FromMinutes(15);
     o.RefreshTokenExpiration = TimeSpan.FromDays(30);
 });
-builder.Services.Configure<DataProtectionTokenProviderOptions>(o => o.TokenLifespan = TimeSpan.FromHours(1));
-builder.Services.AddSingleton<IdentityEmail>();
-builder.Services.AddSingleton<IEmailSender<IdentityUser>>(sp => sp.GetRequiredService<IdentityEmail>());
 builder.Services.AddScoped<CurrentAccount>(); builder.Services.AddScoped<Quota>();
 builder.Services.AddSingleton<PhotoCipher>();
 builder.Services.AddHttpClient("food-catalog", c => c.Timeout = TimeSpan.FromSeconds(8));
@@ -184,7 +181,9 @@ app.Use(async (h, next) =>
     {
         h.Response.Headers["X-Content-Type-Options"] = "nosniff";
         h.Response.Headers["Referrer-Policy"] = "no-referrer";
-        h.Response.Headers["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'";
+        h.Response.Headers["Content-Security-Policy"] = h.Request.Path.StartsWithSegments("/swagger")
+            ? "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'"
+            : "default-src 'none'; frame-ancestors 'none'";
         if (h.Request.Path.StartsWithSegments("/api")) h.Response.Headers.CacheControl = "no-store";
         if (!app.Environment.IsDevelopment()) h.Response.Headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains";
         return Task.CompletedTask;
@@ -203,7 +202,7 @@ app.Use(async (h, next) =>
     await next();
 });
 app.UseCors(); app.UseAuthentication(); app.UseRateLimiter();
-if (localAuth && !developmentAuth) app.Use(LocalIdentity.ValidateLocalIdentity);
+if (localAuth) app.Use(LocalIdentity.ValidateLocalIdentity);
 app.UseAuthorization();
 app.MapGet("/health/live", () => Results.Ok(new { status = "live" })).AllowAnonymous();
 app.MapGet("/health/ready", async (AppDb db, CancellationToken ct) =>
@@ -216,7 +215,18 @@ if (role is "api" or "all")
     if (localAuth) app.MapLocalIdentity();
     var api = app.MapGroup("/api/v1").RequireAuthorization().AddEndpointFilter<AccountFilter>();
     api.MapProfile(); api.MapFoods(); api.MapDiary(); api.MapPlans(); api.MapAnalysis(); app.MapBilling();
-    if (app.Environment.IsDevelopment()) app.MapOpenApi().AllowAnonymous();
+    if (builder.Configuration.GetValue("Swagger:Enabled", true))
+    {
+        app.MapOpenApi().AllowAnonymous();
+        app.UseSwaggerUI(o =>
+        {
+            o.RoutePrefix = "swagger";
+            o.SwaggerEndpoint("../openapi/v1.json", "Kaloree API v1");
+            o.DocumentTitle = "Kaloree API";
+            o.ConfigObject.ValidatorUrl = null;
+            o.ConfigObject.PersistAuthorization = false;
+        });
+    }
 }
 app.Run();
 public partial class Program;
