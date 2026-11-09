@@ -82,6 +82,7 @@ builder.Services.AddAuthorization(); builder.Services.AddProblemDetails();
 builder.Services.AddOpenApi(o => o.AddDocumentTransformer((document, _, _) =>
 {
     document.Info.Title = "Kaloree API"; document.Info.Version = "v1";
+    ApiCategories.Apply(document);
     document.Components ??= new OpenApiComponents();
     document.Components.SecuritySchemes = new Dictionary<string, IOpenApiSecurityScheme>
     {
